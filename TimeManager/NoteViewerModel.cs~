@@ -1,0 +1,343 @@
+
+using System;
+using System.Collections.Generic;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace TimeManager
+{
+    public class NoteViewerModel
+    {
+        private Screenshot currentScreenshot;
+        private NoteViewerView nvv;
+        private TimePeriodAdderModel tpm;
+        private LinkedList<string> timeCheckTypeFilters = new LinkedList<string> ();
+        private DateTime startTimestamp;
+
+        private string dbTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
+
+        public NoteViewerModel (NoteViewerView nvv, TimePeriodAdderModel tpm, DateTime startTimestamp)
+        {
+            this.nvv = nvv;
+            this.tpm = tpm;
+            this.startTimestamp = startTimestamp;
+            
+            
+        }
+
+        public void FirstAfter (DateTime timestamp)
+        {
+            
+            using (NpgsqlConnection conn = Connection ()) {
+                conn.Open ();
+                
+                Console.WriteLine ("time i'm shooting for: " + timestamp.ToString ());
+                
+                
+                
+                string timestampStr = timestamp.ToString (dbTimeFormat);
+                bool forward = true;
+                bool back = false;
+                
+                Screenshot screenshot = GetNextPrevNote (conn, timestampStr, forward, timeCheckTypeFilters);
+                
+                
+                
+                if (screenshot == null) {
+                    Console.WriteLine ("time i'm shooting for: -> note is null");
+                    screenshot = GetNextPrevNote (conn, timestampStr, back, timeCheckTypeFilters);
+                } else {
+                    Console.WriteLine ("time i'm shooting for: -> note not null");
+                }
+                
+                if (screenshot != null) {
+                    currentScreenshot = screenshot;
+                    setNoteDataFileIfAvailible (conn, currentScreenshot);
+                    sendTimeToTimeblockAdder (currentScreenshot);
+                } else {
+                    Console.WriteLine ("time i'm shooting for: -> note null again");
+                }
+                
+                conn.Close ();
+            }
+        }
+
+
+        public void NextNote ()
+        {
+            NextPrevNote (true, timeCheckTypeFilters);
+        }
+
+        public void PrevNote ()
+        {
+            NextPrevNote (false, timeCheckTypeFilters);
+        }
+
+        public void ForwardHour ()
+        {
+            FastforwardRewind (3600, timeCheckTypeFilters);
+        }
+
+        public void BackHour ()
+        {
+            FastforwardRewind (-3600, timeCheckTypeFilters);
+        }
+
+        public void Forward10Min ()
+        {
+            FastforwardRewind (600, timeCheckTypeFilters);
+        }
+
+        public void Back10Min ()
+        {
+            FastforwardRewind (-600, timeCheckTypeFilters);
+        }
+
+        public void SetTimeCheckTypeFilters (LinkedList<string> timeCheckFilters)
+        {
+            this.timeCheckTypeFilters = timeCheckFilters;
+            string currDateTime;
+            
+            
+            
+            if (currentScreenshot == null) {
+                currDateTime = startTimestamp.ToString (dbTimeFormat);
+                Console.WriteLine (" -> ");
+            } else {
+                currDateTime = currentScreenshot.DateTime;
+            }
+            
+            Console.WriteLine (" -> " + currDateTime);
+            
+            
+            
+            JumpToNote (currDateTime, true, timeCheckFilters);
+            if (currentScreenshot == null) {
+                JumpToNote (currDateTime, false, timeCheckFilters);
+            }
+        }
+
+        private string currentScreenshotDateTime ()
+        {
+            string datetime;
+            if (currentScreenshot == null) {
+                return startTimestamp.ToString ();
+            } else {
+                return currentScreenshot.DateTime;
+            }
+        }
+
+        private void FastforwardRewind (int seconds, LinkedList<string> tcFilters)
+        {
+            
+            DateTime d;
+            DateTime.TryParse (currentScreenshotDateTime (), out d);
+            d = d.AddSeconds (seconds);
+            string timestamp = d.ToString (dbTimeFormat);
+            bool forward = seconds > 0;
+            JumpToNote (timestamp, forward, tcFilters);
+        }
+
+        private void NextPrevNote (bool forward, LinkedList<string> tcFilters)
+        {
+            
+            JumpToNote (currentScreenshotDateTime (), forward, tcFilters);
+        }
+
+        private void JumpToNote (string timestamp, bool forward, LinkedList<string> tcFilters)
+        {
+            using (NpgsqlConnection conn = Connection ()) {
+                conn.Open ();
+                
+                Screenshot newScreenshot = GetNextPrevNote (conn, timestamp, forward, tcFilters);
+                
+                if (newScreenshot != null) {
+                    currentScreenshot = newScreenshot;
+                    
+                    
+                    
+                    setNoteDataFileIfAvailible (conn, currentScreenshot);
+                    sendTimeToTimeblockAdder (currentScreenshot);
+                } else {
+                    // TODO message "no more notes"
+                }
+                conn.Close ();
+            }
+        }
+
+        private void setNoteDataFileIfAvailible (NpgsqlConnection conn, Screenshot note)
+        {
+            NoteData noteData = GetNoteDatafile (conn, currentScreenshot.NoteId);
+            if (noteData != null) {
+                if (noteData.DataType == "jpeg") {
+                    nvv.setImage (noteData.Filename);
+                } else {
+                    nvv.setImage ("");
+                }
+                
+                
+                if (noteData.DataType == "mp3") {
+                    System.Diagnostics.Process proc = new System.Diagnostics.Process ();
+                    proc.StartInfo.FileName = "mpg123";
+                    proc.StartInfo.Arguments = "/home/simon/sshot/mp3_archive/" + noteData.Filename;
+                    proc.StartInfo.UseShellExecute = false;
+                    proc.StartInfo.RedirectStandardOutput = false;
+                    proc.Start ();
+                    proc.WaitForExit ();
+                }
+            } else {
+                nvv.setImage ("");
+            }
+        }
+
+        private void sendTimeToTimeblockAdder (Screenshot note)
+        {
+            DateTime dt;
+            bool okay = DateTime.TryParse (note.DateTime, out dt);
+            tpm.recvNoteTime (dt);
+        }
+
+        private NpgsqlConnection Connection ()
+        {
+            NpgsqlConnection conn = new NpgsqlConnection ("Server=127.0.0.1;Port=5432;User Id=simon;Password=dd44yi;Database=test_projects;");
+            return conn;
+        }
+
+
+        private string timeCheckFiltersSqlExpr (LinkedList<string> tcFilters)
+        {
+            if (tcFilters.Count > 0) {
+                string insertFilterItems = "";
+                foreach (string tcFilter in tcFilters) {
+                    insertFilterItems += " or time_check_type = '" + tcFilter + "'";
+                }
+                
+                insertFilterItems = insertFilterItems.Substring (3);
+                insertFilterItems = "( " + insertFilterItems + " ) ";
+                
+                System.Console.WriteLine (insertFilterItems);
+                return insertFilterItems;
+            } else {
+                return "false";
+            }
+        }
+
+        private Screenshot GetFirstAfter (NpgsqlConnection conn, DateTime timestamp, LinkedList<string> tcFilters)
+        {
+            return GetFirstBeforeOrAfter (conn, timestamp, tcFilters, true);
+        }
+
+        private Screenshot GetFirstBefore (NpgsqlConnection conn, DateTime timestamp, LinkedList<string> tcFilters)
+        {
+            return GetFirstBeforeOrAfter (conn, timestamp, tcFilters, false);
+        }
+
+        private Screenshot GetFirstBeforeOrAfter (NpgsqlConnection conn, DateTime timestamp, LinkedList<string> tcFilters, bool forward)
+        {
+            string forwardOrBackOp;
+            string agg;
+            if (forward) {
+                agg = "min";
+                forwardOrBackOp = " > ";
+            } else {
+                agg = "max";
+                Console.WriteLine ("time i'm shooting for: -> note not null");
+                forwardOrBackOp = " < ";
+            }
+            
+            Screenshot note = null;
+            
+            string timeCheckFiltersSqlExpr = this.timeCheckFiltersSqlExpr (tcFilters);
+            
+            String query = "" + "with" + " next_timestamp(time_check_timestamp) as" + "  (select min(time_check_timestamp) as time_check_timestamp " + "    from " + "     time_checks " + "    where " + "      time_check_timestamp " + forwardOrBackOp + " CAST(:time as timestamp without time zone) and " + "      time_check_id not in (select time_check_id from time_block_time_checks) and " + timeCheckFiltersSqlExpr + "  )," + " next_tc_id(time_check_id) as" + "   (select " + agg + " (time_check_id) as time_check_id from time_checks natural join next_timestamp) " + "select time_check_id,CAST(time_check_timestamp as text),time_check_text " + "from time_checks natural join next_tc_id;";
+            
+            using (NpgsqlCommand command = new NpgsqlCommand (query, conn)) {
+                command.Parameters.Add (new NpgsqlParameter ("time", NpgsqlDbType.Text));
+                
+                command.Prepare ();
+                
+                // Now, add a value to it and later execute the command as usual.
+                command.Parameters[0].Value = timestamp;
+                
+                using (NpgsqlDataReader dr = command.ExecuteReader ()) {
+                    if (dr.Read ()) {
+                        note = new Screenshot ();
+                        note.NoteId = (Int64)dr[0];
+                        note.DateTime = (string)dr[1];
+                    }
+                }
+            }
+            return note;
+        }
+
+        private Screenshot GetNextPrevNote (NpgsqlConnection conn, string beforeOrAfterTime, bool forward, LinkedList<string> tcFilters)
+        {
+            
+            string timeCheckFiltersSqlExpr = this.timeCheckFiltersSqlExpr (tcFilters);
+            
+            Screenshot note = null;
+            string forwardOrBack;
+            string maxOrMin;
+            if (forward) {
+                forwardOrBack = " > ";
+                maxOrMin = "min";
+            } else {
+                forwardOrBack = " < ";
+                maxOrMin = "max";
+            }
+            
+            String query = "with" + " next_tc_timestamp as" + "  (select " + maxOrMin + "(time_check_timestamp) as time_check_timestamp " + "   from time_checks " + "   where time_check_timestamp " + forwardOrBack + " CAST(:dt as timestamp without time zone) " + "   and time_check_id not in (select time_check_id from time_block_time_checks) and " + timeCheckFiltersSqlExpr + " )," + " next_tc_id as" + "  (select min(time_check_id) as time_check_id from time_checks natural join next_tc_timestamp)" + "select time_check_id,CAST(time_check_timestamp as text),time_check_text from time_checks natural join next_tc_id";
+            
+            using (NpgsqlCommand command = new NpgsqlCommand (query, conn)) {
+                command.Parameters.Add (new NpgsqlParameter ("dt", NpgsqlDbType.Text));
+                
+                command.Prepare ();
+                
+                
+                
+                // Now, add a value to it and later execute the command as usual.
+                command.Parameters[0].Value = beforeOrAfterTime;
+                
+                using (NpgsqlDataReader dr = command.ExecuteReader ()) {
+                    if (dr.Read ()) {
+                        note = new Screenshot ();
+                        note.NoteId = (Int64)dr[0];
+                        note.DateTime = (string)dr[1];
+                    }
+                }
+            }
+            return note;
+        }
+
+
+
+        private ScreenshotData GetNoteDatafile (NpgsqlConnection conn, Int64 noteId)
+        {
+            String query = "select " + "time_check_datafile, format " + " from time_check_data " + " where time_check_id = :tc_id;";
+            ScreenshotData screenshotData = null;
+            
+            using (NpgsqlCommand command = new NpgsqlCommand (query, conn)) {
+                command.Parameters.Add (new NpgsqlParameter ("tc_id", NpgsqlDbType.Bigint));
+                
+                command.Prepare ();
+                
+                // Now, add a value to it and later execute the command as usual.
+                command.Parameters[0].Value = noteId;
+                
+                using (NpgsqlDataReader dr = command.ExecuteReader ()) {
+                    while (dr.Read ()) {
+                        screenshotData = new NoteData ();
+                        screenshotData.NoteId = noteId;
+                        screenshotData.Filename = (string)dr[0];
+                        screenshotData.DataType = (string)dr[1];
+                    }
+                }
+            }
+            return screenshotData;
+        }
+    }
+    
+}
+
+
